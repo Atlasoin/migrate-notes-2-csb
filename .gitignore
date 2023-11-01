@@ -33,3 +33,10 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+public/images
+public/moments.json
+public/qqzone.json
+public/images-moments
+
+app/.blacklist.ts

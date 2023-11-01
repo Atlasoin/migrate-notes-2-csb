@@ -1,9 +1,38 @@
-This is a [Next.js](https://nextjs.org/) project bootstrapped with [`create-next-app`](https://github.com/vercel/next.js/tree/canary/packages/create-next-app).
+This is a project to help user migrate notes to Crossbell blockchain. For instance, you could migrate your WeChat moments(朋友圈) or qqzone feeds(说说) on Crossbell. After the migration, a new character will be created and you could see your notes on [xFeed](https://xfeed.app/).
 
 ## Getting Started
 
-First, run the development server:
+1. Prepare your notes as following structure and then convert it to json file ``moments.json``:
+```typescript
+interface Moments {
+    account: {
+        banner?: string;
+        avatar?: string;
+        bio?: string;
+        nickname: string;
+        id: string;
+    };
+    moments: {
+        content: string;
+        type: "share" | "text";
+        images: string[];
+        display_images?: string[];
+        share_title: string;
+        share_desc: string;
+        share_url: string;
+        share_image?: string;
+        publish_time: string;
+        id: string;
+    };
+}
+```
+Note: the image urls are expected to be http(s), and if you hope to backup all images as well, rather than only urls, you could put all images under ``/public/images`` with the name that are base64 encoded from the http url. 
+```typescript
+const localImg = `/images/${Buffer.from(imgHttpUrl).toString("base64")}.jpg`
+```
 
+
+2. Put ``moments.json`` in ``/public``, and then run the project locally
 ```bash
 npm run dev
 # or
@@ -12,23 +41,14 @@ yarn dev
 pnpm dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Finally in http://localhost:3000 you will see something like:
+![display](./docs/display.png)
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+3. Upload notes to Crossbell
 
-This project uses [`next/font`](https://nextjs.org/docs/basic-features/font-optimization) to automatically optimize and load Inter, a custom Google Font.
+If you click "use local images", as said before, the image ``/images/${Buffer.from(imgHttpUrl).toString("base64")}.jpg`` will be used for images src, and also local images will be uploaded to ipfs. If not, images src will be http(s) urls, and images will not be uploaded to ipfs.
 
-## Learn More
+And after clicking the "上链存储" button, follow the instructions step by step, you will finally see something like that:
+![display-onchain](./docs/display-onchain.png)
 
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js/) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/deployment) for more details.
+Then you can go to xFeed as instructed to see your notes on Crossbell.

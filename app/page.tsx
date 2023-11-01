@@ -1,113 +1,475 @@
-import Image from 'next/image'
+"use client";
+
+import Image from "next/image";
+import Link from "next/link";
+import { useState } from "react";
+import { ipfsUploadFile } from "crossbell/ipfs";
+import { crossbell } from "crossbell/network";
+import {
+    CharacterMetadata,
+    NoteMetadata,
+    Numberish,
+    createContract,
+} from "crossbell";
+import CryptoJS from "crypto-js";
+import { formatEther } from "viem";
+import { blackLists } from "./blacklist";
+
+interface Moment {
+    content: string;
+    type: "share" | "text";
+    images: string[];
+    display_images?: string[];
+    share_title: string;
+    share_desc: string;
+    share_url: string;
+    share_image?: string;
+    publish_time: string;
+    id: string;
+}
+
+interface Account {
+    banner: string;
+    displayBanner?: string;
+    avatar: string;
+    displayAvatar?: string;
+    nickname: string;
+    id: string;
+    bio?: string;
+}
+
+function getMoments(order: "desc" | "asc" = "desc") {
+    // const data = require("../public/moments.json");
+    const data = require("../public/qqzone.json");
+    const allMoments = data.moments as Moment[];
+    const account = data.account as Account;
+
+    const moments = allMoments
+        .filter((moment) => !blackLists.includes(moment.id))
+        .sort((a, b) => {
+            return +a.publish_time - +b.publish_time;
+        });
+
+    return {
+        moments: order == "asc" ? moments : moments.reverse(),
+        account,
+    };
+}
+
+function prepareMoment(moment: Moment, useLocal: boolean) {
+    const display_images = [] as string[];
+    const images = moment.images;
+    for (const img of moment.images) {
+        if (img.endsWith("/150")) {
+            if (images.includes(img.replace("/150", "/0"))) {
+                continue;
+            }
+        }
+        const imgUrl = useLocal
+            ? `/images/${Buffer.from(img).toString("base64")}.jpg`
+            : img;
+        display_images.push(imgUrl);
+    }
+
+    moment.display_images = display_images;
+
+    const isNull = (str: string | undefined) => {
+        return str === undefined || str === null || str === "";
+    };
+
+    if (
+        isNull(moment.share_desc) &&
+        isNull(moment.share_title) &&
+        isNull(moment.share_url)
+    ) {
+        moment.type = "text";
+    }
+
+    if (moment.type == "share") {
+        if (moment.display_images.length > 1) {
+            console.warn(
+                "Share moment has more than one image. There might be some parsing error."
+            );
+        }
+        moment.share_image = moment.display_images[0] || "";
+    }
+
+    return moment;
+}
+
+function prepareMoments(useLocal: boolean, order: "desc" | "asc" = "desc") {
+    const { moments, account } = getMoments(order);
+
+    const formattedMoments = [] as Moment[];
+
+    for (const moment of moments) {
+        formattedMoments.push(prepareMoment(moment, useLocal));
+    }
+    if (useLocal) {
+        account.displayAvatar = account?.avatar
+            ? `/images/${Buffer.from(account.avatar).toString("base64")}.jpg`
+            : "";
+        account.displayBanner = account?.banner
+            ? `/images/${Buffer.from(account.banner).toString("base64")}.jpg`
+            : "";
+    } else {
+        account.displayAvatar = account.avatar;
+        account.displayBanner = account.banner;
+    }
+
+    return {
+        moments: formattedMoments,
+        account: account
+            ? account
+            : {
+                  id: CryptoJS.MD5("id").toString(),
+                  nickname: "",
+                  avatar: "",
+                  banner: "",
+                  displayAvatar: "",
+                  displayBanner: "",
+              },
+    };
+}
+
+async function addCrossbell() {
+    const chainId = "0x" + crossbell.id.toString(16);
+    return await (window as any).ethereum.request({
+        method: "wallet_addEthereumChain",
+        params: [
+            {
+                chainId: chainId,
+                chainName: crossbell.name,
+                nativeCurrency: crossbell.nativeCurrency,
+                rpcUrls: ["https://rpc.crossbell.io"],
+                iconUrls: [],
+                blockExplorerUrls: ["https://scan.crossbell.io"],
+            },
+        ],
+    });
+}
+
+async function switchCrossbell() {
+    const chainId = "0x" + crossbell.id.toString(16);
+    return await (window as any).ethereum.request({
+        method: "wallet_switchEthereumChain",
+        params: [
+            {
+                chainId,
+            },
+        ],
+    });
+}
+
+async function prepareWallet() {
+    if (!(window as any).ethereum) {
+        return false;
+    }
+    await (window as any).ethereum.request({
+        method: "eth_requestAccounts",
+    });
+    await addCrossbell();
+    await switchCrossbell();
+    return true;
+}
+
+async function uploadImg(img: string) {
+    const blob = await fetch(img).then((res) => res.blob());
+    return ipfsUploadFile(blob);
+}
+
+async function makeIpfsUrl(localUri: string) {
+    const { cid } = await uploadImg(localUri);
+    return `ipfs://${cid}`;
+}
+
+const makeNotesData = (
+    useLocal: boolean,
+    imageUrls: Map<string, string>,
+    wxCharacter: Numberish,
+    moments: Moment[]
+) => {
+    return moments.map((moment) => {
+        const baseNote = {
+            characterId: wxCharacter,
+            metadataOrUri: {
+                date_published: new Date(+moment.publish_time).toISOString(),
+                sources: ["wechat-moments-exporter"],
+            } as NoteMetadata,
+        };
+        if (moment.type === "share" && moment.share_url) {
+            const shareImage = useLocal
+                ? imageUrls.get(moment.share_image!)
+                : moment.share_image!;
+            baseNote.metadataOrUri.content = `<p>${moment.content}<br><br><a href=\"${moment.share_url}\" target=\"_blank\" rel=\"noopener\">${moment.share_url}</a></p><blockquote><b>${moment.share_title}</b><br><p>${moment.share_desc}</p><img src=\"${shareImage}\" referrerpolicy=\"no-referrer\"></blockquote>`;
+        } else {
+            baseNote.metadataOrUri.content = moment.content;
+            baseNote.metadataOrUri.attachments = moment.display_images?.map(
+                (image) => ({
+                    address: useLocal ? imageUrls.get(image)! : image,
+                    mime_type: "image/jpeg",
+                })
+            );
+        }
+        return baseNote;
+    });
+};
+
+const estimateBatch = (objects: any[]) => {
+    const roughObjSize = JSON.stringify(
+        objects,
+        (key, value) => (typeof value === "bigint" ? value.toString() : value) // return everything else unchanged
+    ).length;
+    const batchCount = Math.ceil((roughObjSize * 3) / 128000);
+    const batchSize = Math.ceil(objects.length / batchCount);
+    return { batchCount, batchSize };
+};
+
+async function process(useLocal: boolean, setInfo: (info: string) => void) {
+    let info = "";
+    const success = await prepareWallet();
+    if (!success) {
+        info = "请先安装并登录 metamask";
+        setInfo(info);
+        return;
+    }
+
+    // 0. connect the wallet and crossbell
+    const { moments, account } = prepareMoments(useLocal, "asc");
+    const contract = createContract((window as any).ethereum);
+    info += `\n🎉 钱包配置成功（连接地址: ${contract.account.address}）`;
+    setInfo(info);
+    const { data } = await contract.csb.getBalance({
+        owner: contract.account.address,
+    });
+
+    // 1. check balance
+    const balance = +formatEther(data);
+    const roughNotes = makeNotesData(useLocal, new Map(), 123456, moments);
+    const { batchCount, batchSize } = estimateBatch(roughNotes);
+    const estGas = +formatEther(BigInt(batchCount * 11540011 + 315103), "gwei");
+    // multiple times of posting notes and one character creation
+    if (balance < estGas) {
+        console.log(
+            "balance: " + balance + " CSB; estimated gas: " + estGas + "CSB"
+        );
+        info +=
+            "\nbalance: " +
+            balance +
+            " CSB; estimated gas: " +
+            estGas +
+            "CSB" +
+            '\n余额可能不足，请去<a style="color:red" href="https://faucet.crossbell.io/" target="_blank">水龙头</a>领取 Gas 进行充值，或加入 <a  style="color:red" href="https://discord.gg/S2Xdqu8M">Discord</a> 联系管理员';
+        setInfo(info);
+        return;
+    }
+
+    // 2. create character
+    let avatarUrl = account.avatar;
+    let bannerUrl = account.banner;
+
+    if (useLocal) {
+        avatarUrl = await makeIpfsUrl(account.displayAvatar!);
+        bannerUrl = await makeIpfsUrl(account.displayBanner!);
+    }
+
+    const handle = "wx-" + CryptoJS.MD5(account.id).toString().slice(0, 8);
+
+    const characterProfile = {
+        owner: contract.account.address,
+        handle,
+        metadataOrUri: {
+            name: account.nickname,
+        } as CharacterMetadata,
+    };
+
+    if (account.banner)
+        characterProfile.metadataOrUri.banners = [
+            { address: bannerUrl, mime_type: "image/jpeg" },
+        ];
+
+    if (account.avatar) characterProfile.metadataOrUri.avatars = [avatarUrl];
+
+    if (account.bio) characterProfile.metadataOrUri.bio = account.bio;
+
+    info += `\n准备创建 character:\n <code>profile data: ${JSON.stringify(
+        characterProfile
+    )}</code>`;
+    setInfo(info);
+
+    const res = await contract.character.create(characterProfile);
+    const wxCharacter = res.data;
+
+    info += `\n🎉 character 创建成功: #${wxCharacter}`;
+    setInfo(info);
+
+    // 3. upload images to ipfs
+    const imageUrls = new Map<string, string>();
+    if (useLocal) {
+        const uploadImages = [] as string[];
+
+        moments.map((moment) => {
+            moment.display_images?.map((image) => {
+                uploadImages.push(image);
+            });
+        });
+
+        info += `\n准备上传图片（共${uploadImages.length}张）`;
+        setInfo(info);
+
+        await Promise.all(
+            uploadImages.map(async (image) => {
+                const url = await makeIpfsUrl(image);
+                imageUrls.set(image, url);
+            })
+        );
+
+        info += `\n🎉 图片上传完毕`;
+        setInfo(info);
+    }
+
+    // 4. post notes
+    const notes = makeNotesData(useLocal, imageUrls, wxCharacter, moments);
+    console.log(notes);
+
+    info += `\n共${notes.length}条内容（可在控制台查看详细内容），准备分批上传（共${batchCount}批，每批${batchSize}条）`;
+    setInfo(info);
+
+    for (let i = 0; i < notes.length; i += batchSize) {
+        const batch = notes.slice(i, i + batchSize);
+        await contract.note.postMany({
+            notes: batch,
+        });
+        info += `\n已上传 ${i + batch.length} 条内容`;
+        setInfo(info);
+    }
+
+    info += `\n🎉 所有内容上传成功！可在 <a href="https://xfeed.app/u/${handle}">https://xfeed.app/u/${handle}</a> 查看自己的朋友圈！`;
+    setInfo(info);
+}
 
 export default function Home() {
-  return (
-    <main className="flex min-h-screen flex-col items-center justify-between p-24">
-      <div className="z-10 max-w-5xl w-full items-center justify-between font-mono text-sm lg:flex">
-        <p className="fixed left-0 top-0 flex w-full justify-center border-b border-gray-300 bg-gradient-to-b from-zinc-200 pb-6 pt-8 backdrop-blur-2xl dark:border-neutral-800 dark:bg-zinc-800/30 dark:from-inherit lg:static lg:w-auto  lg:rounded-xl lg:border lg:bg-gray-200 lg:p-4 lg:dark:bg-zinc-800/30">
-          Get started by editing&nbsp;
-          <code className="font-mono font-bold">app/page.tsx</code>
-        </p>
-        <div className="fixed bottom-0 left-0 flex h-48 w-full items-end justify-center bg-gradient-to-t from-white via-white dark:from-black dark:via-black lg:static lg:h-auto lg:w-auto lg:bg-none">
-          <a
-            className="pointer-events-none flex place-items-center gap-2 p-8 lg:pointer-events-auto lg:p-0"
-            href="https://vercel.com?utm_source=create-next-app&utm_medium=appdir-template&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            By{' '}
-            <Image
-              src="/vercel.svg"
-              alt="Vercel Logo"
-              className="dark:invert"
-              width={100}
-              height={24}
-              priority
-            />
-          </a>
-        </div>
-      </div>
+    const [useLocal, setUseLocal] = useState(true);
+    const [info, setInfo] = useState("");
 
-      <div className="relative flex place-items-center before:absolute before:h-[300px] before:w-[480px] before:-translate-x-1/2 before:rounded-full before:bg-gradient-radial before:from-white before:to-transparent before:blur-2xl before:content-[''] after:absolute after:-z-20 after:h-[180px] after:w-[240px] after:translate-x-1/3 after:bg-gradient-conic after:from-sky-200 after:via-blue-200 after:blur-2xl after:content-[''] before:dark:bg-gradient-to-br before:dark:from-transparent before:dark:to-blue-700 before:dark:opacity-10 after:dark:from-sky-900 after:dark:via-[#0141ff] after:dark:opacity-40 before:lg:h-[360px] z-[-1]">
-        <Image
-          className="relative dark:drop-shadow-[0_0_0.3rem_#ffffff70] dark:invert"
-          src="/next.svg"
-          alt="Next.js Logo"
-          width={180}
-          height={37}
-          priority
-        />
-      </div>
+    const { moments, account } = prepareMoments(useLocal);
 
-      <div className="mb-32 grid text-center lg:max-w-5xl lg:w-full lg:mb-0 lg:grid-cols-4 lg:text-left">
-        <a
-          href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template&utm_campaign=create-next-app"
-          className="group rounded-lg border border-transparent px-5 py-4 transition-colors hover:border-gray-300 hover:bg-gray-100 hover:dark:border-neutral-700 hover:dark:bg-neutral-800/30"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <h2 className={`mb-3 text-2xl font-semibold`}>
-            Docs{' '}
-            <span className="inline-block transition-transform group-hover:translate-x-1 motion-reduce:transform-none">
-              -&gt;
-            </span>
-          </h2>
-          <p className={`m-0 max-w-[30ch] text-sm opacity-50`}>
-            Find in-depth information about Next.js features and API.
-          </p>
-        </a>
+    return (
+        <main className="container mx-auto p-10">
+            <div className="relative w-full">
+                <div className="relative h-[300px] overflow-hidden">
+                    <Image
+                        src={account.displayBanner!}
+                        alt="banner"
+                        fill
+                        priority
+                        style={{ objectFit: "cover", objectPosition: "center" }}
+                    />
+                </div>
 
-        <a
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          className="group rounded-lg border border-transparent px-5 py-4 transition-colors hover:border-gray-300 hover:bg-gray-100 hover:dark:border-neutral-700 hover:dark:bg-neutral-800/30"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <h2 className={`mb-3 text-2xl font-semibold`}>
-            Learn{' '}
-            <span className="inline-block transition-transform group-hover:translate-x-1 motion-reduce:transform-none">
-              -&gt;
-            </span>
-          </h2>
-          <p className={`m-0 max-w-[30ch] text-sm opacity-50`}>
-            Learn about Next.js in an interactive course with&nbsp;quizzes!
-          </p>
-        </a>
+                <div className="absolute bottom-[-55px] right-[55px]">
+                    <Image
+                        priority
+                        src={account.displayAvatar!}
+                        alt="Small Image Description"
+                        width={110}
+                        height={110}
+                    />
+                </div>
+            </div>
 
-        <a
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template&utm_campaign=create-next-app"
-          className="group rounded-lg border border-transparent px-5 py-4 transition-colors hover:border-gray-300 hover:bg-gray-100 hover:dark:border-neutral-700 hover:dark:bg-neutral-800/30"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <h2 className={`mb-3 text-2xl font-semibold`}>
-            Templates{' '}
-            <span className="inline-block transition-transform group-hover:translate-x-1 motion-reduce:transform-none">
-              -&gt;
-            </span>
-          </h2>
-          <p className={`m-0 max-w-[30ch] text-sm opacity-50`}>
-            Explore the Next.js 13 playground.
-          </p>
-        </a>
+            <div className="m-10">
+                <div className="py-5">
+                    <input
+                        type="checkbox"
+                        id="use-images"
+                        defaultChecked={useLocal}
+                        onClick={() => setUseLocal(!useLocal)}
+                    />{" "}
+                    <span>use local images (/public/images)</span>
+                </div>
+                <button
+                    className="bg-yellow-500 hover:bg-yellow-600 text-white font-bold py-2 px-4 rounded"
+                    onClick={() => process(useLocal, setInfo)}
+                >
+                    上链存储
+                </button>
+                <div
+                    className="whitespace-pre-line"
+                    dangerouslySetInnerHTML={{ __html: info }}
+                ></div>
+            </div>
 
-        <a
-          href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template&utm_campaign=create-next-app"
-          className="group rounded-lg border border-transparent px-5 py-4 transition-colors hover:border-gray-300 hover:bg-gray-100 hover:dark:border-neutral-700 hover:dark:bg-neutral-800/30"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <h2 className={`mb-3 text-2xl font-semibold`}>
-            Deploy{' '}
-            <span className="inline-block transition-transform group-hover:translate-x-1 motion-reduce:transform-none">
-              -&gt;
-            </span>
-          </h2>
-          <p className={`m-0 max-w-[30ch] text-sm opacity-50`}>
-            Instantly deploy your Next.js site to a shareable URL with Vercel.
-          </p>
-        </a>
-      </div>
-    </main>
-  )
+            {moments.map((moment, index) => (
+                <div key={moment.id}>
+                    <div className="mx-10 my-4">
+                        <p className="text-sm font-thin">{moment.id}</p>
+                        <p>{new Date(moment.publish_time).toLocaleString()}</p>
+                        {moment.type === "share" && moment.share_url ? (
+                            <>
+                                <p>{moment.share_url}</p>
+                                <p className="text-xl whitespace-pre-line">
+                                    {moment.content}
+                                </p>
+
+                                <div className="border p-4">
+                                    <Link
+                                        className="flex"
+                                        href={moment.share_url}
+                                    >
+                                        {moment.share_image && (
+                                            <div className="w-[109px] h-[109px] relative">
+                                                <Image
+                                                    priority
+                                                    src={moment.share_image}
+                                                    alt="moment"
+                                                    fill
+                                                    sizes="109px"
+                                                    style={{
+                                                        objectFit: "cover",
+                                                    }}
+                                                />
+                                            </div>
+                                        )}
+                                        <div className="pl-5">
+                                            <p className="text-xl">
+                                                {moment.share_title}
+                                            </p>
+                                            <p className="text">
+                                                {moment.share_desc}
+                                            </p>
+                                        </div>
+                                    </Link>
+                                </div>
+                            </>
+                        ) : (
+                            <>
+                                <p className="text-xl whitespace-pre-line">
+                                    {moment.content}
+                                </p>
+                                <div className="grid grid-cols-3 gap-1 cols-3 w-[600px]">
+                                    {moment.display_images!.map((image) => (
+                                        <div
+                                            key={image}
+                                            className="w-[200px] h-[200px] relative"
+                                        >
+                                            <Image
+                                                priority
+                                                src={image}
+                                                alt="moment"
+                                                fill
+                                                sizes="200px"
+                                                style={{ objectFit: "cover" }}
+                                            />
+                                        </div>
+                                    ))}
+                                </div>
+                            </>
+                        )}
+                    </div>
+                    <hr className="border-none mx-10 bg-gray-100 h-[0.2px]" />
+                </div>
+            ))}
+        </main>
+    );
 }
